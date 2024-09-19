@@ -11,6 +11,7 @@ import voluptuous_serialize
 from homeassistant import data_entry_flow
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowContext
 import homeassistant.helpers.config_validation as cv
 
 WS_TYPE_SETUP_MFA = "auth/setup_mfa"
@@ -43,7 +44,7 @@ class MfaFlowManager(data_entry_flow.FlowManager):
         self,
         handler_key: str,
         *,
-        context: dict[str, Any],
+        context: FlowContext | None,
         data: dict[str, Any],
     ) -> data_entry_flow.FlowHandler:
         """Create a setup flow. handler is a mfa module."""

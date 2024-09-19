@@ -40,7 +40,7 @@ from .core import (
     HomeAssistant,
     callback,
 )
-from .data_entry_flow import FLOW_NOT_COMPLETE_STEPS, FlowResult
+from .data_entry_flow import FLOW_NOT_COMPLETE_STEPS, FlowContext, FlowResult
 from .exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
@@ -265,6 +265,18 @@ UPDATE_ENTRY_CONFIG_ENTRY_ATTRS = {
     "minor_version",
     "version",
 }
+
+
+class ConfigFlowContext(FlowContext, total=False):
+    """Typed context dict for config flow."""
+
+    alternative_domain: str
+    configuration_url: str
+    confirm_only: bool
+    discovery_key: DiscoveryKey
+    entry_id: str
+    title_placeholders: Mapping[str, str | None]
+    unique_id: str | None
 
 
 class ConfigFlowResult(FlowResult, total=False):
@@ -1012,7 +1024,7 @@ class ConfigEntry(Generic[_DataT]):
     def async_start_reauth(
         self,
         hass: HomeAssistant,
-        context: dict[str, Any] | None = None,
+        context: ConfigFlowContext | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
         """Start a reauth flow."""
@@ -1030,7 +1042,7 @@ class ConfigEntry(Generic[_DataT]):
     async def _async_init_reauth(
         self,
         hass: HomeAssistant,
-        context: dict[str, Any] | None = None,
+        context: ConfigFlowContext | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
         """Start a reauth flow."""
@@ -1042,12 +1054,12 @@ class ConfigEntry(Generic[_DataT]):
                 return
             result = await hass.config_entries.flow.async_init(
                 self.domain,
-                context={
-                    "source": SOURCE_REAUTH,
-                    "entry_id": self.entry_id,
-                    "title_placeholders": {"name": self.title},
-                    "unique_id": self.unique_id,
-                }
+                context=ConfigFlowContext(
+                    source=SOURCE_REAUTH,
+                    entry_id=self.entry_id,
+                    title_placeholders={"name": self.title},
+                    unique_id=self.unique_id,
+                )
                 | (context or {}),
                 data=self.data | (data or {}),
             )
@@ -1072,7 +1084,7 @@ class ConfigEntry(Generic[_DataT]):
     def async_start_reconfigure(
         self,
         hass: HomeAssistant,
-        context: dict[str, Any] | None = None,
+        context: ConfigFlowContext | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
         """Start a reconfigure flow."""
@@ -1089,7 +1101,7 @@ class ConfigEntry(Generic[_DataT]):
     async def _async_init_reconfigure(
         self,
         hass: HomeAssistant,
-        context: dict[str, Any] | None = None,
+        context: ConfigFlowContext | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
         """Start a reconfigure flow."""
@@ -1101,12 +1113,12 @@ class ConfigEntry(Generic[_DataT]):
                 return
             await hass.config_entries.flow.async_init(
                 self.domain,
-                context={
-                    "source": SOURCE_RECONFIGURE,
-                    "entry_id": self.entry_id,
-                    "title_placeholders": {"name": self.title},
-                    "unique_id": self.unique_id,
-                }
+                context=ConfigFlowContext(
+                    source=SOURCE_RECONFIGURE,
+                    entry_id=self.entry_id,
+                    title_placeholders={"name": self.title},
+                    unique_id=self.unique_id,
+                )
                 | (context or {}),
                 data=self.data | (data or {}),
             )
@@ -1200,7 +1212,9 @@ def _report_non_awaited_platform_forwards(entry: ConfigEntry, what: str) -> None
     )
 
 
-class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
+class ConfigEntriesFlowManager(
+    data_entry_flow.FlowManager[ConfigFlowContext, ConfigFlowResult]
+):
     """Manage all the config entry flows that are in progress."""
 
     _flow_result = ConfigFlowResult
@@ -1246,7 +1260,11 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         return False
 
     async def async_init(
-        self, handler: str, *, context: dict[str, Any] | None = None, data: Any = None
+        self,
+        handler: str,
+        *,
+        context: ConfigFlowContext | None = None,
+        data: Any = None,
     ) -> ConfigFlowResult:
         """Start a configuration flow."""
         if not context or "source" not in context:
@@ -1305,7 +1323,7 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         self,
         flow_id: str,
         handler: str,
-        context: dict,
+        context: ConfigFlowContext,
         data: Any,
     ) -> tuple[ConfigFlow, ConfigFlowResult]:
         """Run the init in a task to allow it to be canceled at shutdown."""
@@ -1343,7 +1361,7 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
 
     async def async_finish_flow(
         self,
-        flow: data_entry_flow.FlowHandler[ConfigFlowResult],
+        flow: data_entry_flow.FlowHandler[ConfigFlowContext, ConfigFlowResult],
         result: ConfigFlowResult,
     ) -> ConfigFlowResult:
         """Finish a config flow and add an entry.
@@ -1490,7 +1508,11 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         return result
 
     async def async_create_flow(
-        self, handler_key: str, *, context: dict | None = None, data: Any = None
+        self,
+        handler_key: str,
+        *,
+        context: ConfigFlowContext | None = None,
+        data: Any = None,
     ) -> ConfigFlow:
         """Create a flow for specified handler.
 
@@ -1508,7 +1530,7 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
 
     async def async_post_init(
         self,
-        flow: data_entry_flow.FlowHandler[ConfigFlowResult],
+        flow: data_entry_flow.FlowHandler[ConfigFlowContext, ConfigFlowResult],
         result: ConfigFlowResult,
     ) -> None:
         """After a flow is initialised trigger new flow notifications."""
@@ -1546,7 +1568,7 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
 
     @callback
     def async_has_matching_discovery_flow(
-        self, handler: str, match_context: dict[str, Any], data: Any
+        self, handler: str, match_context: ConfigFlowContext, data: Any
     ) -> bool:
         """Check if an existing matching discovery flow is in progress.
 
@@ -2361,7 +2383,9 @@ def _async_abort_entries_match(
             raise data_entry_flow.AbortFlow("already_configured")
 
 
-class ConfigEntryBaseFlow(data_entry_flow.FlowHandler[ConfigFlowResult]):
+class ConfigEntryBaseFlow(
+    data_entry_flow.FlowHandler[ConfigFlowContext, ConfigFlowResult]
+):
     """Base class for config and option flows."""
 
     _flow_result = ConfigFlowResult
@@ -2382,7 +2406,7 @@ class ConfigFlow(ConfigEntryBaseFlow):
         if not self.context:
             return None
 
-        return cast(str | None, self.context.get("unique_id"))
+        return self.context.get("unique_id")
 
     @staticmethod
     @callback
@@ -2727,7 +2751,9 @@ class ConfigFlow(ConfigEntryBaseFlow):
         raise NotImplementedError
 
 
-class OptionsFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
+class OptionsFlowManager(
+    data_entry_flow.FlowManager[ConfigFlowContext, ConfigFlowResult]
+):
     """Flow to set options for a configuration entry."""
 
     _flow_result = ConfigFlowResult
@@ -2744,7 +2770,7 @@ class OptionsFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         self,
         handler_key: str,
         *,
-        context: dict[str, Any] | None = None,
+        context: ConfigFlowContext | None = None,
         data: dict[str, Any] | None = None,
     ) -> OptionsFlow:
         """Create an options flow for a config entry.
@@ -2757,7 +2783,7 @@ class OptionsFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
 
     async def async_finish_flow(
         self,
-        flow: data_entry_flow.FlowHandler[ConfigFlowResult],
+        flow: data_entry_flow.FlowHandler[ConfigFlowContext, ConfigFlowResult],
         result: ConfigFlowResult,
     ) -> ConfigFlowResult:
         """Finish an options flow and update options for configuration entry.
@@ -2782,7 +2808,7 @@ class OptionsFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         return result
 
     async def _async_setup_preview(
-        self, flow: data_entry_flow.FlowHandler[ConfigFlowResult]
+        self, flow: data_entry_flow.FlowHandler[ConfigFlowContext, ConfigFlowResult]
     ) -> None:
         """Set up preview for an option flow handler."""
         entry = self._async_get_config_entry(flow.handler)
