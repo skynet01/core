@@ -282,6 +282,149 @@ async def test_recorder_discontinuity(
     assert os.path.exists(filename)
 
 
+async def test_recorder_mux_error(
+    hass: HomeAssistant,
+    filename: str,
+    h264_video: BytesIO,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a packet that fails to mux is dropped without losing the recording."""
+    segment = Segment(sequence=1, stream_id=0)
+    add_parts_to_segment(segment, h264_video)
+    segment.duration = 4
+
+    provider_ready = asyncio.Event()
+    mux_calls = 0
+    av_open = av.open
+
+    class MockStream(Stream):
+        """Mock Stream so we can patch add_provider."""
+
+        async def start(self):
+            """Make Stream.start a noop that gives up async context."""
+            await asyncio.sleep(0)
+
+        def add_provider(self, fmt, timeout=OUTPUT_IDLE_TIMEOUT):
+            """Add a finished event to Stream.add_provider."""
+            provider = Stream.add_provider(self, fmt, timeout)
+            provider_ready.set()
+            return provider
+
+    class FailingMuxContainer:
+        """Output container whose second mux call fails."""
+
+        def __init__(self, container: av.container.OutputContainer) -> None:
+            """Wrap a real output container."""
+            self._container = container
+
+        def mux(self, packet: av.Packet) -> None:
+            """Fail the second packet, mux the rest."""
+            nonlocal mux_calls
+            mux_calls += 1
+            if mux_calls == 2:
+                # pylint: disable-next=c-extension-no-member
+                raise av.error.ArgumentError(22, "Mux failed")
+            self._container.mux(packet)
+
+        def __getattr__(self, name: str):
+            """Delegate everything else to the real container."""
+            return getattr(self._container, name)
+
+    def open_output(file, mode="r", **kwargs):
+        """Wrap the recording output container."""
+        container = av_open(file, mode, **kwargs)
+        return FailingMuxContainer(container) if mode == "w" else container
+
+    with (
+        patch.object(hass.config, "is_allowed_path", return_value=True),
+        patch("homeassistant.components.stream.Stream", wraps=MockStream),
+        patch("homeassistant.components.stream.recorder.RecorderOutput.recv"),
+        patch("homeassistant.components.stream.recorder.av.open", new=open_output),
+    ):
+        stream = create_stream(hass, "blank", {}, dynamic_stream_settings())
+        make_recording = hass.async_create_task(stream.async_record(filename))
+        await provider_ready.wait()
+
+        recorder_output = stream.outputs()[RECORDER_PROVIDER]
+        recorder_output.idle_timer.start()
+        recorder_output._segments.append(segment)
+
+        # Fire the IdleTimer
+        future = dt_util.utcnow() + timedelta(seconds=30)
+        async_fire_time_changed(hass, future)
+
+        await make_recording
+
+    assert mux_calls > 2
+    with av.open(filename) as recording:
+        packets = [packet for packet in recording.demux(video=0) if packet.size]
+    assert len(packets) == mux_calls - 1
+    assert "Dropped 1 packet(s) that could not be written to" in caplog.text
+    assert "Mux failed" in caplog.text
+
+
+async def test_record_failure_removes_recorder(
+    hass: HomeAssistant, filename: str
+) -> None:
+    """Test a failed recording does not block the next one."""
+
+    class MockStream(Stream):
+        """Mock Stream so the worker does not start."""
+
+        async def start(self):
+            """Make Stream.start a noop that gives up async context."""
+            await asyncio.sleep(0)
+
+    with patch("homeassistant.components.stream.Stream", wraps=MockStream):
+        stream = create_stream(hass, "blank", {}, dynamic_stream_settings())
+
+    with (
+        patch.object(hass.config, "is_allowed_path", return_value=True),
+        patch(
+            "homeassistant.components.stream.recorder.RecorderOutput.async_record",
+            side_effect=OSError("Disk full"),
+        ),
+        pytest.raises(OSError, match="Disk full"),
+    ):
+        await stream.async_record(filename)
+
+    assert RECORDER_PROVIDER not in stream.outputs()
+
+
+async def test_record_failure_keeps_newer_recorder(
+    hass: HomeAssistant, filename: str
+) -> None:
+    """Test a failed recording does not remove a recorder that replaced it."""
+
+    class MockStream(Stream):
+        """Mock Stream so the worker does not start."""
+
+        async def start(self):
+            """Make Stream.start a noop that gives up async context."""
+            await asyncio.sleep(0)
+
+    with patch("homeassistant.components.stream.Stream", wraps=MockStream):
+        stream = create_stream(hass, "blank", {}, dynamic_stream_settings())
+
+    async def replace_recorder_and_fail() -> None:
+        """Simulate the idle timeout handing over to another recording."""
+        await stream.remove_provider(stream.outputs()[RECORDER_PROVIDER])
+        stream.add_provider(RECORDER_PROVIDER).video_path = "/example/second.mp4"
+        raise OSError("Disk full")
+
+    with (
+        patch.object(hass.config, "is_allowed_path", return_value=True),
+        patch(
+            "homeassistant.components.stream.recorder.RecorderOutput.async_record",
+            side_effect=replace_recorder_and_fail,
+        ),
+        pytest.raises(OSError, match="Disk full"),
+    ):
+        await stream.async_record(filename)
+
+    assert stream.outputs()[RECORDER_PROVIDER].video_path == "/example/second.mp4"
+
+
 async def test_recorder_no_segments(hass: HomeAssistant, filename) -> None:
     """Test recorder behavior with a stream failure which causes no segments."""
 

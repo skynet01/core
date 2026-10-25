@@ -606,7 +606,13 @@ class Stream:
             await hls.recv()
             recorder.prepend(list(hls.get_segments())[-num_segments - 1 : -1])
 
-        await recorder.async_record()
+        try:
+            await recorder.async_record()
+        except Exception:
+            # The idle timeout may already have replaced it with another recording
+            if self._outputs.get(RECORDER_PROVIDER) is recorder:
+                await self.remove_provider(recorder)
+            raise
 
     async def async_get_image(
         self,

@@ -79,12 +79,15 @@ class RecorderOutput(StreamOutput):
         running_duration = 0
 
         last_sequence = -math.inf
+        dropped_packets = 0
+        first_mux_error: str | None = None
 
         def write_segment(segment: Segment) -> None:
             """Write a segment to output."""
             # fmt: off
             nonlocal output, output_v, output_a
             nonlocal last_stream_id, running_duration, last_sequence
+            nonlocal dropped_packets, first_mux_error
             # fmt: on
             # Because the stream_worker is in a different
             # thread from the record service, the lookback
@@ -162,7 +165,12 @@ class RecorderOutput(StreamOutput):
                 stream = output_v if packet.stream.type == "video" else output_a
                 assert stream
                 packet.stream = stream
-                output.mux(packet)
+                # Drop the packet rather than lose the whole recording
+                try:
+                    output.mux(packet)
+                except av.FFmpegError as err:
+                    dropped_packets += 1
+                    first_mux_error = first_mux_error or str(err)
 
             source.close()
 
@@ -190,6 +198,13 @@ class RecorderOutput(StreamOutput):
                 _LOGGER.error("Recording failed to capture anything")
                 return
             output.close()
+            if dropped_packets:
+                _LOGGER.warning(
+                    "Dropped %s packet(s) that could not be written to '%s': %s",
+                    dropped_packets,
+                    self.video_path,
+                    first_mux_error,
+                )
             try:
                 write_transform_matrix_and_rename(self.video_path)
             except FileNotFoundError:
