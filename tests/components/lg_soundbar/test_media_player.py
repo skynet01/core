@@ -6,6 +6,7 @@ import lg_bartalk as soundbar_client
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
+from homeassistant.components.lg_soundbar.media_player import LGDevice
 from homeassistant.components.media_player import (
     ATTR_INPUT_SOURCE,
     ATTR_INPUT_SOURCE_LIST,
@@ -341,3 +342,72 @@ async def test_unload_closes_listener(
 
     mock_soundbar_client.return_value.close.assert_called_once_with()
     assert hass.states.get(ENTITY_ID).state == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("play_control", "expected_state"),
+    [
+        pytest.param(0, MediaPlayerState.PLAYING, id="playing"),
+        pytest.param(1, MediaPlayerState.PAUSED, id="paused"),
+    ],
+)
+async def test_power_resync_preserves_playback_state(
+    hass: HomeAssistant,
+    mock_soundbar_client: MagicMock,
+    mock_config_entry: MockConfigEntry,
+    play_control: int,
+    expected_state: MediaPlayerState,
+) -> None:
+    """Test repeated power reports preserve playback until a real shutdown."""
+    await setup_integration(hass, mock_config_entry)
+    callback = find_update_callback(mock_soundbar_client)
+    callback(
+        {
+            "msg": "PLAY_INFO",
+            "data": {"i_stream_type": 1, "i_play_ctrl": play_control},
+        }
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_ID).state == expected_state
+
+    send_power_status(callback, True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_ID).state == expected_state
+
+    send_power_status(callback, False)
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_ID).state == MediaPlayerState.OFF
+
+    send_power_status(callback, True)
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_ID).state == MediaPlayerState.ON
+
+
+@pytest.mark.parametrize(
+    "request_method",
+    [
+        "get_product_info",
+        "get_mac_info",
+        "get_eq",
+        "get_info",
+        "get_func",
+        "get_settings",
+        "get_play",
+    ],
+)
+async def test_failed_initial_request_closes_listener(
+    hass: HomeAssistant,
+    mock_soundbar_client: MagicMock,
+    request_method: str,
+) -> None:
+    """Test failed entity setup closes the client and preserves the error."""
+    error = OSError("Initial request failed")
+    getattr(mock_soundbar_client.return_value, request_method).side_effect = error
+    device = LGDevice("127.0.0.1", 9741, "uuid")
+    device.hass = hass
+
+    with pytest.raises(OSError) as exc_info:
+        await device.async_added_to_hass()
+
+    assert exc_info.value is error
+    mock_soundbar_client.return_value.close.assert_called_once_with()

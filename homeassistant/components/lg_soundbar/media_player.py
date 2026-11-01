@@ -176,10 +176,13 @@ class LGDevice(MediaPlayerEntity):
                 self._function = data["i_curr_func"]
             if "b_powerstatus" in data:
                 self._device_on = data["b_powerstatus"]
-                if data["b_powerstatus"]:
-                    self._attr_state = MediaPlayerState.ON
-                else:
+                if not self._device_on:
                     self._attr_state = MediaPlayerState.OFF
+                elif self._attr_state not in (
+                    MediaPlayerState.PLAYING,
+                    MediaPlayerState.PAUSED,
+                ):
+                    self._attr_state = MediaPlayerState.ON
         elif response["msg"] == "FUNC_VIEW_INFO":
             if "i_curr_func" in data:
                 self._function = data["i_curr_func"]
